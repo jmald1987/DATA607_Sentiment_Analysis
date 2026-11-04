@@ -1,0 +1,12 @@
+---
+title: "Sentiment Analysis"
+author: "Johnny Maldonado"
+format: html
+editor: visual
+---
+
+## Introduction
+
+Medicaid eligibility changes have become an important topic as new federal requirements approach implementation in 2027. My earlier DATA 607 research examined Medicaid coverage using data from the American Community Survey. This project builds on that work by examining how Medicaid eligibility changes and work requirements are discussed in news reporting. Using headlines, abstracts, and introductory paragraphs retrieved through the New York Times Article Search API, the analysis will explore patterns in positive and negative language. The objective is to examine the tone of the reporting rather than measure public opinion or determine the effects of the policy changes.
+
+The analysis follows Chapter 2 of Text Mining with R: A Tidy Approach by Julia Silge and David Robinson, which demonstrates sentiment analysis using Jane Austen's novels. The original example will first be reproduced in Quarto before applying the techniques to Medicaid-related news coverage. The extension will use the Bing sentiment dictionary alongside the additional Jockers lexicon to examine how different dictionaries classify the same text. Comparing these results with the original literary example will help illustrate how sentiment analysis can be applied to different types of writing, while also identifying the limitations of interpreting language through individual words.
