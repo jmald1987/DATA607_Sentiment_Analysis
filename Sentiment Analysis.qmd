@@ -7,6 +7,413 @@ editor: visual
 
 ## Introduction
 
-Medicaid eligibility changes have become an important topic as new federal requirements approach implementation in 2027. My earlier DATA 607 research examined Medicaid coverage using data from the American Community Survey. This project builds on that work by examining how Medicaid eligibility changes and work requirements are discussed in news reporting. Using headlines, abstracts, and introductory paragraphs retrieved through the New York Times Article Search API, the analysis will explore patterns in positive and negative language. The objective is to examine the tone of the reporting rather than measure public opinion or determine the effects of the policy changes.
+This assignment reproduces the sentiment analysis methods from Chapter 2 of *Text Mining with R: A Tidy Approach* by Julia Silge and David Robinson using Jane Austen's novels. Building on my earlier DATA 607 research into Medicaid coverage, I will extend these methods to New York Times reporting about Medicaid eligibility changes and work requirements. The analysis incorporates API retrieval and JSON processing techniques from previous assignments to collect article text, then applies the Bing and Jockers sentiment lexicons to compare how they classify the language. The objective is to evaluate differences in word-based sentiment rather than measure public opinion or the effects of policy changes.
 
-The analysis follows Chapter 2 of Text Mining with R: A Tidy Approach by Julia Silge and David Robinson, which demonstrates sentiment analysis using Jane Austen's novels. The original example will first be reproduced in Quarto before applying the techniques to Medicaid-related news coverage. The extension will use the Bing sentiment dictionary alongside the additional Jockers lexicon to examine how different dictionaries classify the same text. Comparing these results with the original literary example will help illustrate how sentiment analysis can be applied to different types of writing, while also identifying the limitations of interpreting language through individual words.
+## Part 1: Reproducing Chapter 2
+
+### Load packages
+
+```{r setup}
+library(tidyverse)
+library(tidytext)
+library(janeaustenr)
+library(textdata)
+library(lexicon)
+library(httr2)
+```
+
+### Preparing Jane Austen's novels
+
+The six novels are converted into tidy text with one word per row. Line numbers are retained to examine changes in sentiment throughout each novel.
+
+```{r austen-data}
+tidy_books <- austen_books() %>%
+  group_by(book) %>%
+  mutate(
+    linenumber = row_number(),
+    chapter = cumsum(str_detect(
+      text,
+      regex("^chapter [\\divxlc]", ignore_case = TRUE)
+    ))
+  ) %>%
+  ungroup() %>%
+  unnest_tokens(word, text)
+
+head(tidy_books)
+```
+
+### NRC: Joy-related words in Emma
+
+The NRC lexicon identifies words associated with emotions such as joy, sadness, and fear. The following code counts words associated with joy in *Emma*.
+
+```{r emma-joy}
+nrc_joy <- get_sentiments("nrc") %>%
+  filter(sentiment == "joy")
+
+emma_joy <- tidy_books %>%
+  filter(book == "Emma") %>%
+  inner_join(nrc_joy, by = "word") %>%
+  count(word, sort = TRUE)
+
+head(emma_joy, 10)
+```
+
+### Bing: Sentiment across six novels
+
+The Bing lexicon classifies words as positive or negative. Following Chapter 2, the text is divided into sections of 80 lines. Net sentiment is calculated by subtracting negative matches from positive matches.
+
+```{r austen-bing}
+austen_sentiment <- tidy_books %>%
+  inner_join(get_sentiments("bing"), by = "word") %>%
+  count(book, index = linenumber %/% 80, sentiment) %>%
+  pivot_wider(
+    names_from = sentiment,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  mutate(sentiment = positive - negative)
+
+ggplot(austen_sentiment,
+       aes(index, sentiment, fill = book)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~book, ncol = 2, scales = "free_x") +
+  labs(
+    title = "Sentiment Across Jane Austen's Novels",
+    x = "Narrative section (80 lines)",
+    y = "Net sentiment"
+  )
+```
+
+### Comparing AFINN, Bing, and NRC
+
+Chapter 2 compares three dictionaries using *Pride and Prejudice*. AFINN assigns numeric sentiment scores, while Bing and NRC use positive and negative classifications.
+
+```{r austen-lexicons}
+pride <- tidy_books %>%
+  filter(book == "Pride & Prejudice")
+
+afinn_scores <- pride %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(index = linenumber %/% 80) %>%
+  summarise(
+    sentiment = sum(value),
+    .groups = "drop"
+  ) %>%
+  mutate(method = "AFINN")
+
+category_scores <- bind_rows(
+  pride %>%
+    inner_join(get_sentiments("bing"), by = "word") %>%
+    mutate(method = "Bing"),
+
+  pride %>%
+    inner_join(
+      get_sentiments("nrc") %>%
+        filter(sentiment %in% c("positive", "negative")),
+      by = "word"
+    ) %>%
+    mutate(method = "NRC")
+) %>%
+  count(method, index = linenumber %/% 80, sentiment) %>%
+  pivot_wider(
+    names_from = sentiment,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  mutate(sentiment = positive - negative) %>%
+  select(method, index, sentiment)
+
+lexicon_comparison <- bind_rows(
+  afinn_scores,
+  category_scores
+)
+
+ggplot(lexicon_comparison,
+       aes(index, sentiment, fill = method)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~method, ncol = 1, scales = "free_y") +
+  labs(
+    title = "Sentiment Dictionary Comparison",
+    subtitle = "Pride and Prejudice",
+    x = "Narrative section (80 lines)",
+    y = "Sentiment score"
+  )
+```
+
+### Common positive and negative words
+
+Identifying frequently matched words helps explain how the Bing lexicon classifies the novels.
+
+```{r austen-words}
+tidy_books %>%
+  inner_join(get_sentiments("bing"), by = "word") %>%
+  count(word, sentiment, sort = TRUE) %>%
+  group_by(sentiment) %>%
+  slice_max(n, n = 10, with_ties = FALSE) %>%
+  ungroup()
+```
+
+### Interpretation
+
+The Jane Austen examples demonstrate how sentiment can change throughout a narrative. Different dictionaries may produce different scores because they assign sentiment to words in different ways. The results also illustrate a limitation of word-based analysis: a word may be classified as positive or negative even when its meaning depends on the surrounding context.
+
+## Part 2: Medicaid News Sentiment Analysis
+
+### Data acquisition
+
+The New York Times Article Search API is used to retrieve articles concerning Medicaid work requirements. The query searches articles published between January 1, 2025, and November 8, 2026.
+
+To keep the analysis manageable, the first page of results is used, containing up to ten articles. The retrieved headlines, abstracts, and lead paragraphs provide the text for sentiment analysis.
+
+```{r medicaid-api}
+# Use the previously configured NYT API key
+api_key <- Sys.getenv("NYT_API_KEY")
+
+if (!nzchar(api_key)) {
+  stop("NYT_API_KEY was not found in this R session.")
+}
+
+# Request article data
+response <- request(
+  "https://api.nytimes.com/svc/search/v2/articlesearch.json"
+) %>%
+  req_url_query(
+    q = "Medicaid work requirements",
+    begin_date = "20250101",
+    end_date = "20261108",
+    sort = "newest",
+    page = 0,
+    `api-key` = api_key
+  ) %>%
+  req_perform() %>%
+  resp_body_json(simplifyVector = FALSE)
+
+# Extract the JSON article records
+docs <- response$response$docs
+
+if (length(docs) == 0) {
+  stop("No articles returned for the search.")
+}
+
+# Convert results into a tidy data frame
+nyt <- tibble(
+  article_id = seq_along(docs),
+
+  headline = map_chr(
+    docs,
+    ~ pluck(.x, "headline", "main", .default = "")
+  ),
+
+  abstract = map_chr(
+    docs,
+    ~ pluck(.x, "abstract", .default = "")
+  ),
+
+  lead = map_chr(
+    docs,
+    ~ pluck(.x, "lead_paragraph", .default = "")
+  ),
+
+  published = map_chr(
+    docs,
+    ~ pluck(.x, "pub_date", .default = "")
+  ),
+
+  url = map_chr(
+    docs,
+    ~ pluck(.x, "web_url", .default = "")
+  )
+) %>%
+  mutate(
+    # Use the abstract when available,
+    # otherwise use the lead paragraph
+    summary_text = coalesce(
+      na_if(abstract, ""),
+      na_if(lead, ""),
+      ""
+    ),
+    text = str_squish(
+      paste(headline, summary_text)
+    )
+  ) %>%
+  filter(nzchar(text))
+
+# Display the retrieved articles
+knitr::kable(
+  nyt %>%
+    select(article_id, published, headline, url),
+  caption = "New York Times Medicaid Article Sample"
+)
+```
+
+### Text preparation
+
+The retrieved article text is tokenized into individual words using the same approach as the Jane Austen example.
+
+```{r medicaid-tokens}
+news_words <- nyt %>%
+  select(article_id, text) %>%
+  unnest_tokens(word, text)
+
+head(news_words)
+```
+
+### Applying the Bing lexicon
+
+Bing classifies matched words as positive or negative. We assign positive words a value of 1 and negative words a value of -1, then calculate the average matched-word score for each article.
+
+```{r medicaid-bing}
+bing_scores <- news_words %>%
+  inner_join(
+    get_sentiments("bing"),
+    by = "word"
+  ) %>%
+  mutate(
+    score = if_else(
+      sentiment == "positive", 1, -1
+    )
+  ) %>%
+  group_by(article_id) %>%
+  summarise(
+    bing = mean(score),
+    bing_matches = n(),
+    .groups = "drop"
+  )
+
+bing_scores
+```
+
+### Applying the Jockers lexicon
+
+The Jockers lexicon provides numeric sentiment values ranging from -1 to 1. The same article text is analyzed to compare its results with Bing.
+
+```{r medicaid-jockers}
+jockers_scores <- news_words %>%
+  inner_join(
+    as_tibble(lexicon::key_sentiment_jockers),
+    by = "word"
+  ) %>%
+  group_by(article_id) %>%
+  summarise(
+    jockers = mean(value),
+    jockers_matches = n(),
+    .groups = "drop"
+  )
+
+jockers_scores
+```
+
+## Part 3: Comparison and Discussion
+
+### Comparing the results
+
+The scores from both dictionaries are combined by article. Positive values indicate predominantly positive sentiment, while negative values indicate predominantly negative sentiment among matched words.
+
+```{r comparison-table}
+comparison <- nyt %>%
+  select(article_id, headline) %>%
+  left_join(bing_scores, by = "article_id") %>%
+  left_join(jockers_scores, by = "article_id") %>%
+  mutate(
+    bing_tone = case_when(
+      is.na(bing) ~ "No matches",
+      bing > 0 ~ "Positive",
+      bing < 0 ~ "Negative",
+      TRUE ~ "Neutral"
+    ),
+    jockers_tone = case_when(
+      is.na(jockers) ~ "No matches",
+      jockers > 0 ~ "Positive",
+      jockers < 0 ~ "Negative",
+      TRUE ~ "Neutral"
+    )
+  )
+
+knitr::kable(
+  comparison %>%
+    select(
+      article_id,
+      bing_matches,
+      jockers_matches,
+      bing_tone,
+      jockers_tone
+    ),
+  caption = "Bing and Jockers Sentiment Comparison"
+)
+```
+
+### Visualization
+
+The following graph compares the average sentiment scores of the words matched by each dictionary for each article.
+
+```{r comparison-plot}
+comparison %>%
+  select(article_id, bing, jockers) %>%
+  pivot_longer(
+    cols = c(bing, jockers),
+    names_to = "lexicon",
+    values_to = "score"
+  ) %>%
+  ggplot(aes(
+    x = factor(article_id),
+    y = score,
+    fill = lexicon
+  )) +
+  geom_col(position = "dodge") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Medicaid News Sentiment",
+    subtitle = "Bing and Jockers lexicons",
+    x = "Article ID",
+    y = "Average matched-word sentiment",
+    fill = "Lexicon"
+  )
+```
+
+### Agreement between dictionaries
+
+This calculation checks how often Bing and Jockers assign the same direction of sentiment to an article.
+
+```{r comparison-agreement}
+comparable <- comparison %>%
+  filter(!is.na(bing), !is.na(jockers))
+
+agreement_count <- sum(
+  sign(comparable$bing) ==
+    sign(comparable$jockers)
+)
+
+cat(
+  "Articles retrieved:", nrow(nyt), "\n",
+  "Articles scored by both lexicons:",
+  nrow(comparable), "\n",
+  "Agreement on sentiment direction:",
+  agreement_count, "articles"
+)
+```
+
+### Discussion
+
+The original Jane Austen analysis examines changes in sentiment throughout complete literary works. The Medicaid extension applies similar word-based techniques to shorter news article excerpts, demonstrating how the same methods can be used with a different text corpus.
+
+Bing and Jockers use different sentiment dictionaries and scoring approaches. Their scores are therefore not directly interchangeable, although their positive or negative directions can be compared.
+
+The results should be interpreted cautiously. News headlines and summaries do not contain the complete article text, and individual words may have different meanings depending on context. The sample is also limited to the first page of search results. Consequently, the analysis describes sentiment within the selected excerpts rather than public opinion or the effects of Medicaid policy changes.
+
+## Conclusion
+
+This assignment reproduced the sentiment analysis techniques from Chapter 2 of *Text Mining with R* and extended them to Medicaid-related news reporting. The extension combined API data acquisition, JSON processing, text tokenization, and sentiment dictionary comparison.
+
+The NYT search returned `r nrow(nyt)` articles. Of these, `r nrow(comparable)` contained sentiment matches in both dictionaries, and the dictionaries agreed on sentiment direction for `r agreement_count` articles.
+
+The analysis demonstrates how methods developed for literary text can be applied to contemporary news reporting. It also highlights the importance of dictionary selection and the limitations of interpreting sentiment without considering context.
+
+## References
+
+Silge, J., & Robinson, D. (2017). *Text Mining with R: A Tidy Approach*. Chapter 2, "Sentiment analysis with tidy data." https://www.tidytextmining.com/sentiment
+
+The New York Times. *Article Search API*. https://github.com/nytimes/public_api_specs
+
+Jockers, M. L. (2017). *Syuzhet: Extract sentiment and plot arcs from text*. https://github.com/mjockers/syuzhet
+
+Rinker, T. W. *lexicon: Lexicons for Text Analysis*. https://cran.r-project.org/package=lexicon
